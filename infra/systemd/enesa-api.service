@@ -1,0 +1,16 @@
+[Unit]
+Description=Enesa Automation Hub API
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/enesa-automation-hub/backend
+EnvironmentFile=/opt/enesa-automation-hub/backend/.env
+ExecStart=/usr/bin/env uvicorn app.main:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+User=enesa
+Group=enesa
+
+[Install]
+WantedBy=multi-user.target

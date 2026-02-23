@@ -1,0 +1,116 @@
+services:
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: enesa-sqlserver
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "${SQLSERVER_SA_PASSWORD}"
+      MSSQL_PID: "${SQLSERVER_PID:-Standard}"
+    ports:
+      - "${SQLSERVER_PORT:-1433}:1433"
+    volumes:
+      - sqlserver_data:/var/opt/mssql
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P $$MSSQL_SA_PASSWORD -Q 'SELECT 1' -C"
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: enesa-redis
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: enesa-api
+    env_file:
+      - ../backend/.env
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - backend_artifacts:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      sqlserver:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 8
+
+  worker:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: enesa-worker
+    command: ["python", "-m", "app.workers.executor"]
+    env_file:
+      - ../backend/.env
+    volumes:
+      - backend_artifacts:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      sqlserver:
+        condition: service_healthy
+    restart: unless-stopped
+
+  cleanup:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: enesa-cleanup
+    command: ["python", "-m", "app.workers.cleanup"]
+    env_file:
+      - ../backend/.env
+    volumes:
+      - backend_artifacts:/app/data
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    container_name: enesa-frontend
+    env_file:
+      - ../frontend/.env.local
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--spider", "http://localhost:3000"]
+      interval: 20s
+      timeout: 5s
+      retries: 8
+
+volumes:
+  sqlserver_data:
+  redis_data:
+  backend_artifacts:

@@ -1,0 +1,16 @@
+[Unit]
+Description=Enesa Automation Hub Frontend
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/enesa-automation-hub/frontend
+EnvironmentFile=/opt/enesa-automation-hub/frontend/.env.local
+ExecStart=/usr/bin/env npm run start
+Restart=always
+RestartSec=5
+User=enesa
+Group=enesa
+
+[Install]
+WantedBy=multi-user.target

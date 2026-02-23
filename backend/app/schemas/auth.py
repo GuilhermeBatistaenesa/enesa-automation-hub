@@ -10,5 +10,7 @@ class Token(ORMModel):
 
 
 class AuthUser(ORMModel):
-    user: UserRead
-
+    user: UserRead | None = None
+    subject: str
+    role: str
+    auth_source: str

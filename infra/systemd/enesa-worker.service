@@ -1,0 +1,16 @@
+[Unit]
+Description=Enesa Automation Hub Worker
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/enesa-automation-hub/backend
+EnvironmentFile=/opt/enesa-automation-hub/backend/.env
+ExecStart=/usr/bin/env python -m app.workers.executor
+Restart=always
+RestartSec=5
+User=enesa
+Group=enesa
+
+[Install]
+WantedBy=multi-user.target

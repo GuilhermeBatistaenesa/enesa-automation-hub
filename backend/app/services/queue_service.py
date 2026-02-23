@@ -7,6 +7,7 @@ from redis import Redis
 from redis.asyncio import Redis as AsyncRedis
 
 from app.core.config import get_settings
+from app.core.metrics import queue_depth
 
 settings = get_settings()
 
@@ -35,9 +36,17 @@ def get_sync_redis() -> Redis:
 async def enqueue_run(payload: dict[str, Any]) -> None:
     redis = await get_async_redis()
     await redis.lpush(settings.redis_queue_name, json.dumps(payload))
+    depth = await redis.llen(settings.redis_queue_name)
+    queue_depth.set(depth)
 
 
 async def publish_run_log(run_id: str, payload: dict[str, Any]) -> None:
     redis = await get_async_redis()
     await redis.publish(get_run_log_channel(run_id), json.dumps(payload, default=str))
 
+
+def refresh_queue_depth_sync() -> int:
+    redis = get_sync_redis()
+    depth = redis.llen(settings.redis_queue_name)
+    queue_depth.set(depth)
+    return int(depth)

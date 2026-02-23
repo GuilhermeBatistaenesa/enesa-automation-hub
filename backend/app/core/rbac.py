@@ -1,0 +1,76 @@
+from __future__ import annotations
+
+from enum import Enum
+
+
+class Role(str, Enum):
+    ADMIN = "Admin"
+    MAINTAINER = "Maintainer"
+    OPERATOR = "Operator"
+    VIEWER = "Viewer"
+
+
+PERMISSION_ROBOT_READ = "robot.read"
+PERMISSION_ROBOT_RUN = "robot.run"
+PERMISSION_RUN_READ = "run.read"
+PERMISSION_ARTIFACT_DOWNLOAD = "artifact.download"
+PERMISSION_ROBOT_PUBLISH = "robot.publish"
+PERMISSION_SERVICE_READ = "service.read"
+PERMISSION_SERVICE_RUN = "service.run"
+PERMISSION_SERVICE_MANAGE = "service.manage"
+PERMISSION_ADMIN_MANAGE = "admin.manage"
+
+ALL_PERMISSIONS = {
+    PERMISSION_ROBOT_READ,
+    PERMISSION_ROBOT_RUN,
+    PERMISSION_RUN_READ,
+    PERMISSION_ARTIFACT_DOWNLOAD,
+    PERMISSION_ROBOT_PUBLISH,
+    PERMISSION_SERVICE_READ,
+    PERMISSION_SERVICE_RUN,
+    PERMISSION_SERVICE_MANAGE,
+    PERMISSION_ADMIN_MANAGE,
+}
+
+PERMISSION_RESOURCE_TYPES: dict[str, str] = {
+    PERMISSION_ROBOT_READ: "robot",
+    PERMISSION_ROBOT_RUN: "robot",
+    PERMISSION_ROBOT_PUBLISH: "robot",
+    PERMISSION_RUN_READ: "run",
+    PERMISSION_ARTIFACT_DOWNLOAD: "artifact",
+    PERMISSION_SERVICE_READ: "service",
+    PERMISSION_SERVICE_RUN: "service",
+    PERMISSION_SERVICE_MANAGE: "service",
+    PERMISSION_ADMIN_MANAGE: "admin",
+}
+
+ROLE_PERMISSIONS: dict[Role, set[str]] = {
+    Role.ADMIN: set(ALL_PERMISSIONS),
+    Role.MAINTAINER: {
+        PERMISSION_ROBOT_READ,
+        PERMISSION_ROBOT_RUN,
+        PERMISSION_RUN_READ,
+        PERMISSION_ARTIFACT_DOWNLOAD,
+        PERMISSION_ROBOT_PUBLISH,
+        PERMISSION_SERVICE_READ,
+        PERMISSION_SERVICE_RUN,
+    },
+    Role.OPERATOR: {
+        PERMISSION_ROBOT_READ,
+        PERMISSION_ROBOT_RUN,
+        PERMISSION_RUN_READ,
+        PERMISSION_ARTIFACT_DOWNLOAD,
+        PERMISSION_SERVICE_READ,
+        PERMISSION_SERVICE_RUN,
+    },
+    Role.VIEWER: {
+        PERMISSION_ROBOT_READ,
+        PERMISSION_RUN_READ,
+        PERMISSION_ARTIFACT_DOWNLOAD,
+        PERMISSION_SERVICE_READ,
+    },
+}
+
+
+def permissions_for_role(role: Role) -> set[str]:
+    return set(ROLE_PERMISSIONS.get(role, set()))

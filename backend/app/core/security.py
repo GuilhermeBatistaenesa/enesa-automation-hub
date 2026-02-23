@@ -23,8 +23,13 @@ def create_access_token(subject: str, extra: dict[str, Any] | None = None, expir
     settings = get_settings()
     now = datetime.now(timezone.utc)
     expire = now + (expires_delta or timedelta(minutes=settings.access_token_expire_minutes))
-    payload: dict[str, Any] = {"sub": subject, "iat": int(now.timestamp()), "exp": int(expire.timestamp())}
+    payload: dict[str, Any] = {
+        "sub": subject,
+        "iat": int(now.timestamp()),
+        "exp": int(expire.timestamp()),
+        "iss": "enesa-local",
+        "token_type": "local_access",
+    }
     if extra:
         payload.update(extra)
     return jwt.encode(payload, settings.secret_key, algorithm=settings.algorithm)
-

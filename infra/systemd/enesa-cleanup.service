@@ -1,0 +1,16 @@
+[Unit]
+Description=Enesa Automation Hub Cleanup Scheduler
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/enesa-automation-hub/backend
+EnvironmentFile=/opt/enesa-automation-hub/backend/.env
+ExecStart=/usr/bin/env python -m app.workers.cleanup
+Restart=always
+RestartSec=30
+User=enesa
+Group=enesa
+
+[Install]
+WantedBy=multi-user.target

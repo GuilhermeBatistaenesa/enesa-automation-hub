@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from sqlalchemy import select
+from starlette.websockets import WebSocketState
 
-from app.api.deps import get_current_user
-from app.db.session import SessionLocal, get_db
-from app.models.user import User
+from app.api.deps import authenticate_websocket_principal, can_access_run
+from app.core.rbac import PERMISSION_RUN_READ
+from app.db.session import SessionLocal
+from app.models.run import Run
 from app.services.queue_service import get_async_redis, get_run_log_channel
-from app.services.run_service import get_run, get_run_logs
+from app.services.run_service import get_run_logs
 
 router = APIRouter(prefix="/ws", tags=["websocket"])
 
@@ -25,21 +26,21 @@ async def run_log_stream(websocket: WebSocket, run_id: UUID) -> None:
 
     db = SessionLocal()
     try:
-        current_user = get_current_user(token=token, db=db)
+        principal = authenticate_websocket_principal(token=token, db=db)
     except Exception:
         db.close()
         await websocket.close(code=4401)
         return
 
-    if not current_user:
-        db.close()
-        await websocket.close(code=4401)
-        return
-
-    run = get_run(db=db, run_id=run_id)
+    run = db.scalar(select(Run).where(Run.run_id == run_id))
     if not run:
         db.close()
         await websocket.close(code=4404)
+        return
+
+    if not can_access_run(db=db, principal=principal, run_id=run_id, permission=PERMISSION_RUN_READ):
+        db.close()
+        await websocket.close(code=4403)
         return
 
     await websocket.accept()
@@ -60,21 +61,18 @@ async def run_log_stream(websocket: WebSocket, run_id: UUID) -> None:
     pubsub = redis.pubsub()
     await pubsub.subscribe(get_run_log_channel(str(run_id)))
 
-    async def _watch_disconnect() -> None:
+    async def watch_disconnect() -> None:
         while True:
             await websocket.receive_text()
 
-    disconnect_task = asyncio.create_task(_watch_disconnect())
+    disconnect_task = asyncio.create_task(watch_disconnect())
 
     try:
         while True:
             message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
             if message and message.get("type") == "message":
                 payload = message.get("data")
-                if isinstance(payload, str):
-                    await websocket.send_text(payload)
-                else:
-                    await websocket.send_text(json.dumps(payload))
+                await websocket.send_text(payload if isinstance(payload, str) else str(payload))
             if disconnect_task.done():
                 break
     except WebSocketDisconnect:
@@ -83,5 +81,5 @@ async def run_log_stream(websocket: WebSocket, run_id: UUID) -> None:
         disconnect_task.cancel()
         await pubsub.unsubscribe(get_run_log_channel(str(run_id)))
         await pubsub.close()
-        await websocket.close()
-
+        if websocket.client_state != WebSocketState.DISCONNECTED:
+            await websocket.close()
