@@ -1,0 +1,13 @@
+[Unit]
+Description=Enesa Automation Hub SLA Monitor
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/enesa-automation-hub/backend
+ExecStart=/usr/bin/python -m app.workers.sla_monitor
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

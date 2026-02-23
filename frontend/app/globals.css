@@ -228,6 +228,11 @@ tbody td {
   color: #ff9a9a;
 }
 
+.status-pill.canceled {
+  background: rgba(159, 180, 217, 0.25);
+  color: #dbe7ff;
+}
+
 .toolbar {
   display: flex;
   gap: 10px;

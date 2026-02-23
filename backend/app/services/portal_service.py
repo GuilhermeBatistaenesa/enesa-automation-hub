@@ -335,11 +335,13 @@ async def execute_service(
     form_schema = validate_form_schema(service.form_schema_json)
     run_template = validate_run_template(service.run_template_json)
     validated = validate_service_parameters(form_schema=form_schema, run_template=run_template, parameters=parameters)
+    env_name = str(run_template.defaults.get("env_name", "PROD")).upper()
 
     payload = RunExecuteRequest(
         version_id=service.default_version_id,
         runtime_arguments=validated.runtime_arguments,
         runtime_env=validated.runtime_env,
+        env_name=env_name,
     )
     run = await create_run_and_enqueue(
         db=db,

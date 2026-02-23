@@ -13,6 +13,7 @@ class RunExecuteRequest(BaseModel):
     robot_version_id: UUID | None = None
     runtime_arguments: list[str] = Field(default_factory=list)
     runtime_env: dict[str, str] = Field(default_factory=dict)
+    env_name: str = Field(default="PROD", pattern="^(PROD|HML|TEST)$")
 
     @property
     def resolved_version_id(self) -> UUID | None:
@@ -55,6 +56,9 @@ class RunRead(ORMModel):
     robot_id: UUID
     robot_version_id: UUID
     service_id: UUID | None
+    schedule_id: UUID | None
+    trigger_type: str
+    attempt: int
     parameters_json: dict | None
     status: str
     queued_at: datetime
@@ -65,6 +69,10 @@ class RunRead(ORMModel):
     error_message: str | None
     host_name: str | None
     process_id: int | None
+    env_name: str
+    cancel_requested: bool
+    canceled_at: datetime | None
+    canceled_by: UUID | None
     robot_version: RunVersionSummary | None = None
     service: RunServiceSummary | None = None
     artifacts: list[ArtifactRead] = Field(default_factory=list)

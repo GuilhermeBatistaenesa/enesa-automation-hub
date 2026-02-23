@@ -1,40 +1,24 @@
-# Enesa Automation Hub
+ï»¿# Enesa Automation Hub
 
-Plataforma corporativa full-stack para cadastro de robos, execucao remota e portal de autoatendimento por dominio.
+Plataforma corporativa full-stack para cadastro de robos, execucao remota, portal por dominio e operacao automatica por scheduler/SLA.
 
 ## Arquitetura
 
-- `backend/`: FastAPI + SQL Server + Redis + WebSocket de logs
-- `frontend/`: Next.js 14 (App Router) com dashboard, registry de versoes e portal de servicos
-- `infra/`: compose, reverse proxy (Nginx/IIS), scripts de operacao
-- `backend/app/workers`: worker de execucao para scripts Python e binarios EXE
+- `backend/`: FastAPI + SQL Server + Redis + WebSocket
+- `frontend/`: Next.js 14 (App Router)
+- `backend/app/workers`: executor, cleanup, scheduler, sla_monitor
 
 ## Capacidades
 
-- Registry de robos com versoes (SemVer), publish/rollback e artefatos versionados
-- Execucao remota com fila Redis e stream de logs via WebSocket
-- Historico de runs com download de artefatos e metadados
-- Portal de autoatendimento por dominios (ex: DP/RH, Engenharia)
-- Servicos com formulario dinamico (`form_schema_json`) e template de run (`run_template_json`)
-- RBAC com papeis `Admin`, `Maintainer`, `Operator`, `Viewer`
-- SSO Azure AD (OIDC/JWKS) com fallback local opcional
-- Auditoria (`audit_events`) e metricas Prometheus (`/metrics`)
-
-## Estrutura
-
-```text
-enesa-automation-hub/
-|- backend/
-|  |- app/
-|  |- migrations/
-|  |- tests/
-|- frontend/
-|  |- app/
-|  |- components/
-|  |- lib/
-|- infra/
-|- scripts/
-```
+- Registry de versoes com publish/rollback e SHA256
+- Execucao manual e agendada (cron)
+- Timeout por run, retry com backoff, lock de concorrencia
+- SLA monitor com alertas: `LATE`, `FAILURE_STREAK`, `WORKER_DOWN`, `QUEUE_BACKLOG`
+- Portal de autoatendimento com formularios dinamicos
+- Controle operacional avancado: cancelamento de run, pause/resume de worker e painel operacional
+- Deploy CI/CD estilo "Vercel interno" via GitHub Actions com `DEPLOY_TOKEN`
+- Config/Secrets por robo e ambiente (`PROD`, `HML`, `TEST`) com criptografia em repouso
+- RBAC, auditoria e metricas Prometheus
 
 ## Setup rapido
 
@@ -43,10 +27,12 @@ enesa-automation-hub/
 1. `cd backend`
 2. `pip install -r requirements.txt`
 3. Configurar `.env`
-4. Rodar migracoes SQL (`0001`..`0004`)
-5. Iniciar API: `uvicorn app.main:app --host 0.0.0.0 --port 8000`
-6. Iniciar worker: `python -m app.workers.executor`
-7. Iniciar cleanup: `python -m app.workers.cleanup`
+4. Rodar migracoes SQL (`0001`..`0007`)
+5. `uvicorn app.main:app --host 0.0.0.0 --port 8000`
+6. `python -m app.workers.executor`
+7. `python -m app.workers.cleanup`
+8. `python -m app.workers.scheduler`
+9. `python -m app.workers.sla_monitor`
 
 ### Frontend
 
@@ -57,122 +43,110 @@ enesa-automation-hub/
 
 ## Migracoes SQL Server
 
-Executar em ordem:
-
 1. `backend/migrations/0001_initial_schema.sql`
 2. `backend/migrations/0002_enterprise_security_observability.sql`
 3. `backend/migrations/0003_robot_versions_registry.sql`
 4. `backend/migrations/0004_self_service_portal.sql`
-
-## Principais tabelas
-
-- `robots`, `robot_versions`, `robot_release_tags`
-- `domains`, `services`
-- `runs`, `run_logs`, `artifacts`
-- `users`, `permissions`, `audit_events`
+5. `backend/migrations/0005_scheduler_sla.sql`
+6. `backend/migrations/0006_operational_control.sql`
+7. `backend/migrations/0007_github_deploy_env_manager.sql`
 
 ## Endpoints principais
 
-### Registry de versoes
+### Registry
 
-- `POST /api/v1/robots`
 - `POST /api/v1/robots/{robot_id}/versions/publish`
 - `GET /api/v1/robots/{robot_id}/versions`
 - `POST /api/v1/robots/{robot_id}/versions/{version_id}/activate`
 
-### Execucao
+### Scheduler + SLA + Alertas
+
+- `POST /api/v1/robots/{robot_id}/schedule`
+- `GET /api/v1/robots/{robot_id}/schedule`
+- `PATCH /api/v1/robots/{robot_id}/schedule`
+- `DELETE /api/v1/robots/{robot_id}/schedule`
+- `POST /api/v1/robots/{robot_id}/sla`
+- `GET /api/v1/robots/{robot_id}/sla`
+- `PATCH /api/v1/robots/{robot_id}/sla`
+- `GET /api/v1/alerts`
+- `POST /api/v1/alerts/{alert_id}/resolve`
+
+### Operacoes
+
+- `POST /api/v1/runs/{run_id}/cancel`
+- `GET /api/v1/workers`
+- `POST /api/v1/workers/{worker_id}/pause`
+- `POST /api/v1/workers/{worker_id}/resume`
+- `GET /api/v1/ops/status`
+
+### Deploy CI/CD + Config/Secrets
+
+- `POST /api/v1/deploy/robots/{robot_id}/versions/publish` (via `x-deploy-token`)
+- `GET /api/v1/robots/{robot_id}/env?env=PROD|HML|TEST`
+- `PUT /api/v1/robots/{robot_id}/env?env=PROD|HML|TEST`
+- `DELETE /api/v1/robots/{robot_id}/env/{key}?env=PROD|HML|TEST`
+
+## GitHub Actions (exemplo)
+
+```yaml
+name: Publish Robot Version
+on:
+  workflow_dispatch:
+    inputs:
+      robot_id:
+        required: true
+      version:
+        required: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build artifact
+        run: |
+          mkdir -p dist
+          zip -r "dist/artifact.zip" . -x ".git/*"
+      - name: Publish to Enesa Hub
+        env:
+          HUB_URL: ${{ secrets.ENESA_HUB_URL }}
+          HUB_DEPLOY_TOKEN: ${{ secrets.ENESA_HUB_DEPLOY_TOKEN }}
+        run: |
+          curl -fSL -X POST \
+            -H "x-deploy-token: ${HUB_DEPLOY_TOKEN}" \
+            -F "version=${{ inputs.version }}" \
+            -F "changelog=Published from GitHub Actions" \
+            -F "commit_sha=${{ github.sha }}" \
+            -F "branch=${{ github.ref_name }}" \
+            -F "build_url=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            -F "activate=true" \
+            -F "entrypoint_path=main.py" \
+            -F "entrypoint_type=PYTHON" \
+            -F "artifact=@dist/artifact.zip;type=application/zip" \
+            "${HUB_URL}/api/v1/deploy/robots/${{ inputs.robot_id }}/versions/publish"
+```
+
+## Configurando criptografia de secrets
+
+Gerar `ENCRYPTION_KEY` (Fernet):
+
+```bash
+python - <<'PY'
+from cryptography.fernet import Fernet
+print(Fernet.generate_key().decode())
+PY
+```
+
+### Runs
 
 - `POST /api/v1/runs/{robot_id}/execute`
-- `GET /api/v1/runs`
+- `GET /api/v1/runs?trigger_type=MANUAL|SCHEDULED|RETRY`
 - `GET /api/v1/runs/{run_id}/logs`
 - `GET /api/v1/runs/{run_id}/artifacts/{artifact_id}/download`
-- `WS /api/v1/ws/runs/{run_id}/logs?token=<jwt>`
-
-### Portal de autoatendimento
-
-- `POST/GET/PATCH/DELETE /api/v1/domains`
-- `POST/GET/PATCH/DELETE /api/v1/services`
-- `GET /api/v1/domains/{slug}/services`
-- `POST /api/v1/services/{service_id}/run`
-- `GET /api/v1/services/{service_id}/runs`
-
-## Fluxo do Portal
-
-1. Admin cria dominio (ex: `DP/RH`).
-2. Admin cria servico vinculando `robot_id` e opcional `default_version_id`.
-3. Admin define `form_schema_json` e `run_template_json`.
-4. Usuario do portal abre o servico, preenche formulario e executa.
-5. Backend valida parametros, aplica template e cria run na fila Redis.
-6. Usuario acompanha logs ao vivo e baixa artefatos no historico.
-
-## Exemplo ASO/MetaX
-
-### form_schema_json
-
-```json
-{
-  "fields": [
-    {
-      "key": "periodo",
-      "label": "Periodo (YYYY-MM)",
-      "type": "text",
-      "required": true,
-      "helpText": "Exemplo: 2026-02",
-      "validation": {
-        "regex": "^\\d{4}-\\d{2}$"
-      }
-    },
-    {
-      "key": "incluir_inativos",
-      "label": "Incluir colaboradores inativos",
-      "type": "checkbox",
-      "default": false
-    },
-    {
-      "key": "sistema_origem",
-      "label": "Sistema origem",
-      "type": "select",
-      "required": true,
-      "options": [
-        { "label": "ASO", "value": "aso" },
-        { "label": "MetaX", "value": "metax" }
-      ]
-    }
-  ]
-}
-```
-
-### run_template_json
-
-```json
-{
-  "defaults": {
-    "incluir_inativos": false
-  },
-  "mapping": {
-    "runtime_arguments": [
-      "--periodo={periodo}",
-      "--inativos={incluir_inativos}",
-      "--origem={sistema_origem}"
-    ],
-    "runtime_env": {
-      "SERVICE_AREA": "dp-rh"
-    }
-  }
-}
-```
-
-## RBAC
-
-- `service.read`: visualizar portal
-- `service.run`: executar servicos
-- `service.manage`: criar/editar dominios e servicos
-- `robot.read`, `robot.run`, `robot.publish`, `run.read`, `artifact.download`, `admin.manage`
 
 ## Testes backend
 
-No diretório `backend/`:
-
 ```bash
+cd backend
 python -m pytest tests -q
 ```

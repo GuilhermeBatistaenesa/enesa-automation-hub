@@ -1,0 +1,13 @@
+[Unit]
+Description=Enesa Automation Hub Scheduler
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/enesa-automation-hub/backend
+ExecStart=/usr/bin/python -m app.workers.scheduler
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

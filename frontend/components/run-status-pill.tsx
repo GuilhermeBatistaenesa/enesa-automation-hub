@@ -7,7 +7,8 @@ export function RunStatusPill({ status }: { status: string }) {
         pending: status === "PENDING",
         running: status === "RUNNING",
         success: status === "SUCCESS",
-        failed: status === "FAILED"
+        failed: status === "FAILED",
+        canceled: status === "CANCELED"
       })}
     >
       {status}

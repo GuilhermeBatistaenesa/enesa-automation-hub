@@ -41,8 +41,12 @@ class Robot(Base):
     versions: Mapped[list["RobotVersion"]] = relationship(back_populates="robot", cascade="all, delete-orphan")
     runs: Mapped[list["Run"]] = relationship(back_populates="robot")
     services: Mapped[list["Service"]] = relationship(back_populates="robot")
+    schedule: Mapped["Schedule | None"] = relationship(back_populates="robot", uselist=False, cascade="all, delete-orphan")
+    sla_rule: Mapped["SlaRule | None"] = relationship(back_populates="robot", uselist=False, cascade="all, delete-orphan")
+    alerts: Mapped[list["AlertEvent"]] = relationship(back_populates="robot")
     tags: Mapped[list["RobotTag"]] = relationship(back_populates="robot", cascade="all, delete-orphan")
     release_tags: Mapped[list["RobotReleaseTag"]] = relationship(back_populates="robot", cascade="all, delete-orphan")
+    env_vars: Mapped[list["RobotEnvVar"]] = relationship(back_populates="robot", cascade="all, delete-orphan")
 
 
 class RobotVersion(Base):
@@ -57,6 +61,11 @@ class RobotVersion(Base):
     artifact_path: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     artifact_sha256: Mapped[str | None] = mapped_column(String(128), nullable=True)
     changelog: Mapped[str | None] = mapped_column(Text, nullable=True)
+    commit_sha: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    branch: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    build_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    created_source: Mapped[str] = mapped_column(String(50), nullable=False, default="user")
+    required_env_keys_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
 
     entrypoint_type: Mapped[str] = mapped_column(String(20), nullable=False, default=EntryPointType.PYTHON.value)
     entrypoint_path: Mapped[str] = mapped_column(String(1024), nullable=False, default="main.py")

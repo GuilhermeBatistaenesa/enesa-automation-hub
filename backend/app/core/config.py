@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     algorithm: str = "HS256"
     auth_mode: str = "hybrid"
     allow_local_auth: bool = True
+    deploy_token: str = ""
+    encryption_key: str = ""
 
     sql_server_host: str = "localhost"
     sql_server_port: int = 1433
@@ -35,12 +37,19 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     redis_queue_name: str = "enesa:runs:queue"
     redis_pubsub_prefix: str = "enesa:runs"
+    redis_worker_heartbeat_prefix: str = "enesa:workers:heartbeat"
 
     artifacts_root: Path = Field(default=Path("./data/artifacts"))
     python_executable: str = "python"
     artifact_retention_days: int = 90
     log_retention_days: int = 90
     cleanup_interval_hours: int = 24
+    app_timezone: str = "America/Sao_Paulo"
+    scheduler_interval_seconds: int = 30
+    sla_monitor_interval_seconds: int = 60
+    queue_backlog_alert_threshold: int = 100
+    worker_stale_seconds: int = 180
+    failure_streak_threshold: int = 3
 
     cors_origins: str = "http://localhost:3000"
     allowed_hosts: str = "localhost,127.0.0.1"
@@ -118,6 +127,9 @@ class Settings(BaseSettings):
     def run_channel(self, run_id: str) -> str:
         return f"{self.redis_pubsub_prefix}:{run_id}:logs"
 
+    def worker_heartbeat_key(self, worker_name: str) -> str:
+        return f"{self.redis_worker_heartbeat_prefix}:{worker_name}"
+
 
 def _csv_to_set(raw: str) -> set[str]:
     return {item.strip() for item in raw.split(",") if item.strip()}
@@ -126,4 +138,3 @@ def _csv_to_set(raw: str) -> set[str]:
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
-

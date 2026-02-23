@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import hmac
 from uuid import UUID
 
 from fastapi import Depends, HTTPException, Request, status
@@ -21,6 +22,21 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.api_v1_prefix}/auth/to
 
 def get_current_principal(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> Principal:
     return authenticate_token(db=db, token=token)
+
+
+def require_deploy_token(request: Request) -> str:
+    header_token = request.headers.get("x-deploy-token")
+    auth = request.headers.get("authorization")
+    bearer_token = None
+    if auth and auth.lower().startswith("bearer "):
+        bearer_token = auth.split(" ", 1)[1].strip()
+    provided = (header_token or bearer_token or "").strip()
+    expected = settings.deploy_token.strip()
+    if not expected:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="DEPLOY_TOKEN is not configured.")
+    if not provided or not hmac.compare_digest(provided, expected):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid deploy token.")
+    return "github_actions"
 
 
 def authenticate_websocket_principal(token: str, db: Session) -> Principal:
@@ -117,6 +133,36 @@ def require_run_permission(permission: str, run_id_param: str = "run_id") -> Cal
         if not _has_permission_for_robot(db=db, principal=principal, permission=permission, robot_id=run.robot_id):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permissao insuficiente.")
         return principal
+
+    return dependency
+
+
+def require_any_run_permission(permissions: list[str], run_id_param: str = "run_id") -> Callable:
+    def dependency(
+        request: Request,
+        principal: Principal = Depends(get_current_principal),
+        db: Session = Depends(get_db),
+    ) -> Principal:
+        raw_run_id = request.path_params.get(run_id_param)
+        if not raw_run_id:
+            if principal.is_admin or any(permission in principal.permissions for permission in permissions):
+                return principal
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permissao insuficiente.")
+
+        try:
+            run_id = UUID(str(raw_run_id))
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="run_id invalido.") from exc
+
+        run = db.scalar(select(Run).where(Run.run_id == run_id))
+        if not run:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run nao encontrada.")
+
+        for permission in permissions:
+            if _has_permission_for_robot(db=db, principal=principal, permission=permission, robot_id=run.robot_id):
+                return principal
+
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permissao insuficiente.")
 
     return dependency
 

@@ -2,7 +2,7 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
-import { executeRun, fetchRobots } from "@/lib/api";
+import { cancelRun, executeRun, fetchRobots, fetchRun } from "@/lib/api";
 import { Robot } from "@/lib/types";
 import { useRunStream } from "@/lib/use-run-stream";
 
@@ -18,10 +18,12 @@ export default function ExecutionsPage() {
   const [robotVersionId, setRobotVersionId] = useState("");
   const [runtimeArgsRaw, setRuntimeArgsRaw] = useState("");
   const [runtimeEnvRaw, setRuntimeEnvRaw] = useState("");
+  const [envName, setEnvName] = useState<"PROD" | "HML" | "TEST">("PROD");
   const [currentRunId, setCurrentRunId] = useState<string | null>(null);
   const [currentRunStatus, setCurrentRunStatus] = useState<string>("PENDING");
   const [error, setError] = useState<string | null>(null);
   const [isExecuting, setIsExecuting] = useState(false);
+  const [isCanceling, setIsCanceling] = useState(false);
 
   const selectedRobot = useMemo(() => robots.find((robot) => robot.id === robotId), [robots, robotId]);
 
@@ -64,8 +66,34 @@ export default function ExecutionsPage() {
       setCurrentRunStatus("FAILED");
       return;
     }
+    if (msg.includes("execution canceled by user") || msg.includes("marked as canceled")) {
+      setCurrentRunStatus("CANCELED");
+      return;
+    }
+    if (msg.includes("timeout")) {
+      setCurrentRunStatus("FAILED");
+      return;
+    }
+    if (["SUCCESS", "FAILED", "CANCELED"].includes(currentRunStatus)) return;
     setCurrentRunStatus("RUNNING");
-  }, [logs, currentRunId]);
+  }, [logs, currentRunId, currentRunStatus]);
+
+  useEffect(() => {
+    if (!currentRunId) return;
+    const terminal = ["SUCCESS", "FAILED", "CANCELED"].includes(currentRunStatus);
+    if (terminal) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const run = await fetchRun(currentRunId, token);
+        setCurrentRunStatus(run.status);
+      } catch {
+        // noop
+      }
+    }, 2000);
+
+    return () => clearInterval(interval);
+  }, [currentRunId, currentRunStatus, token]);
 
   const loadRobots = async () => {
     try {
@@ -107,7 +135,8 @@ export default function ExecutionsPage() {
           version_id: robotVersionId || undefined,
           robot_version_id: robotVersionId || undefined,
           runtime_arguments: runtimeArguments,
-          runtime_env: runtimeEnv
+          runtime_env: runtimeEnv,
+          env_name: envName
         },
         token
       );
@@ -117,6 +146,22 @@ export default function ExecutionsPage() {
       setError(err instanceof Error ? err.message : "Failed to trigger execution.");
     } finally {
       setIsExecuting(false);
+    }
+  };
+
+  const onCancelRun = async () => {
+    if (!currentRunId) return;
+    if (!window.confirm("Confirmar cancelamento da execucao em andamento?")) return;
+
+    setIsCanceling(true);
+    setError(null);
+    try {
+      const canceled = await cancelRun(currentRunId, token);
+      setCurrentRunStatus(canceled.status);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Falha ao solicitar cancelamento.");
+    } finally {
+      setIsCanceling(false);
     }
   };
 
@@ -157,6 +202,14 @@ export default function ExecutionsPage() {
               </select>
             </label>
             <label>
+              Ambiente
+              <select value={envName} onChange={(event) => setEnvName(event.target.value as "PROD" | "HML" | "TEST")}>
+                <option value="PROD">PROD</option>
+                <option value="HML">HML</option>
+                <option value="TEST">TEST</option>
+              </select>
+            </label>
+            <label>
               Runtime arguments (comma-separated)
               <input value={runtimeArgsRaw} onChange={(event) => setRuntimeArgsRaw(event.target.value)} placeholder="--input=dataset1,--retry=2" />
             </label>
@@ -172,6 +225,11 @@ export default function ExecutionsPage() {
             <button className="btn-secondary" type="button" onClick={() => loadRobots()}>
               Refresh robots
             </button>
+            {currentRunId && currentRunStatus === "RUNNING" ? (
+              <button className="btn-secondary" type="button" onClick={onCancelRun} disabled={isCanceling}>
+                {isCanceling ? "Cancelando..." : "Cancelar Execucao"}
+              </button>
+            ) : null}
             {currentRunId ? <RunStatusPill status={currentRunStatus} /> : null}
           </div>
           {error ? <p className="helper-text" style={{ color: "#ff9a9a" }}>{error}</p> : null}

@@ -165,6 +165,12 @@ def publish_robot_version(
     arguments: list[str] | None = None,
     env_vars: dict[str, str] | None = None,
     working_directory: str | None = None,
+    activate: bool = True,
+    created_source: str = "user",
+    commit_sha: str | None = None,
+    branch: str | None = None,
+    build_url: str | None = None,
+    required_env_keys_json: list[str] | None = None,
 ) -> RobotVersion:
     robot = db.scalar(select(Robot).where(Robot.id == robot_id))
     if not robot:
@@ -176,7 +182,9 @@ def publish_robot_version(
     if existing:
         raise ValueError("Version already exists for this robot.")
 
-    db.query(RobotVersion).filter(RobotVersion.robot_id == robot_id).update({RobotVersion.is_active: False})
+    if activate:
+        db.query(RobotVersion).filter(RobotVersion.robot_id == robot_id).update({RobotVersion.is_active: False})
+
     published = RobotVersion(
         robot_id=robot_id,
         version=version,
@@ -185,6 +193,11 @@ def publish_robot_version(
         artifact_path=artifact_path,
         artifact_sha256=artifact_sha256,
         changelog=changelog,
+        commit_sha=commit_sha,
+        branch=branch,
+        build_url=build_url,
+        created_source=created_source,
+        required_env_keys_json=required_env_keys_json or [],
         entrypoint_type=entrypoint_type,
         entrypoint_path=entrypoint_path,
         arguments=arguments or [],
@@ -192,13 +205,14 @@ def publish_robot_version(
         working_directory=working_directory,
         checksum=artifact_sha256,
         created_by=created_by,
-        is_active=True,
+        is_active=activate,
     )
     db.add(published)
     db.flush()
-    _set_release_tag(db, robot_id, "latest", published.id)
-    if channel == "stable":
-        _set_release_tag(db, robot_id, "stable", published.id)
+    if activate:
+        _set_release_tag(db, robot_id, "latest", published.id)
+        if channel == "stable":
+            _set_release_tag(db, robot_id, "stable", published.id)
     db.commit()
     db.refresh(published)
     return published

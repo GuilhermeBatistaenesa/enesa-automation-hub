@@ -4,10 +4,11 @@ import uuid
 from datetime import datetime, timezone
 from enum import Enum
 
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text, Uuid
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
+from app.models.scheduler import TriggerType
 
 
 class RunStatus(str, Enum):
@@ -15,6 +16,7 @@ class RunStatus(str, Enum):
     RUNNING = "RUNNING"
     SUCCESS = "SUCCESS"
     FAILED = "FAILED"
+    CANCELED = "CANCELED"
 
 
 class Run(Base):
@@ -24,7 +26,10 @@ class Run(Base):
     robot_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("robots.id"), nullable=False, index=True)
     robot_version_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("robot_versions.id"), nullable=False, index=True)
     service_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), ForeignKey("services.id"), nullable=True, index=True)
+    schedule_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), ForeignKey("schedules.id"), nullable=True, index=True)
     parameters_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    trigger_type: Mapped[str] = mapped_column(String(20), nullable=False, default=TriggerType.MANUAL.value, index=True)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default=RunStatus.PENDING.value, index=True)
     queued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -34,10 +39,15 @@ class Run(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     host_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     process_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    env_name: Mapped[str] = mapped_column(String(20), nullable=False, default="PROD", index=True)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    canceled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    canceled_by: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True)
 
     robot: Mapped["Robot"] = relationship(back_populates="runs")
     robot_version: Mapped["RobotVersion"] = relationship(back_populates="runs")
     service: Mapped["Service | None"] = relationship(back_populates="runs")
+    schedule: Mapped["Schedule | None"] = relationship(back_populates="runs")
     logs: Mapped[list["RunLog"]] = relationship(back_populates="run", cascade="all, delete-orphan")
     artifacts: Mapped[list["Artifact"]] = relationship(back_populates="run", cascade="all, delete-orphan")
 

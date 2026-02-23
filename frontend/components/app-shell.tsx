@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { Bot, ChartNoAxesCombined, Gauge, PanelsTopLeft, PlaySquare, Settings2 } from "lucide-react";
+import { Bot, ChartNoAxesCombined, Gauge, PanelsTopLeft, PlaySquare, Settings2, ShieldCheck } from "lucide-react";
 
 const links = [
   { href: "/", label: "Dashboard", icon: Gauge },
@@ -7,6 +7,7 @@ const links = [
   { href: "/robots", label: "Robos", icon: Bot },
   { href: "/executions", label: "Execucao", icon: PlaySquare },
   { href: "/runs", label: "Historico", icon: ChartNoAxesCombined },
+  { href: "/admin/operations", label: "Operacoes", icon: ShieldCheck },
   { href: "/admin/domains", label: "Admin", icon: Settings2 }
 ];
 

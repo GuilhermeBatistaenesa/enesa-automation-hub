@@ -45,6 +45,11 @@ class RobotVersionPublishResult(ORMModel):
     artifact_path: str | None
     artifact_sha256: str | None
     changelog: str | None
+    commit_sha: str | None
+    branch: str | None
+    build_url: str | None
+    created_source: str
+    required_env_keys_json: list[str] = Field(default_factory=list)
     entrypoint_type: str
     entrypoint_path: str
     arguments: list[str]
@@ -68,6 +73,11 @@ class RobotVersionRead(ORMModel):
     artifact_path: str | None
     artifact_sha256: str | None
     changelog: str | None
+    commit_sha: str | None
+    branch: str | None
+    build_url: str | None
+    created_source: str
+    required_env_keys_json: list[str] = Field(default_factory=list)
     entrypoint_type: str
     entrypoint_path: str
     arguments: list[str]
@@ -92,4 +102,3 @@ class RobotRead(ORMModel):
 class RobotListResponse(ORMModel):
     items: list[RobotRead]
     total: int
-

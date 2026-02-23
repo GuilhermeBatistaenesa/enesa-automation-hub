@@ -10,7 +10,10 @@ from app.api.deps import allowed_robot_ids_for_permission, require_permission
 from app.core.rbac import PERMISSION_ROBOT_PUBLISH, PERMISSION_ROBOT_READ
 from app.db.session import get_db
 from app.models.robot import ArtifactType
+from app.schemas.common import Message
+from app.schemas.env_var import RobotEnvVarRead, RobotEnvVarUpsertRequest
 from app.schemas.robot import RobotCreate, RobotListResponse, RobotRead, RobotTagsUpdate, RobotVersionRead
+from app.schemas.scheduler import ScheduleCreate, ScheduleRead, ScheduleUpdate, SlaRuleCreate, SlaRuleRead, SlaRuleUpdate
 from app.services.audit_service import extract_client_ip, log_audit_event
 from app.services.identity_service import Principal
 from app.services.robot_service import (
@@ -24,7 +27,9 @@ from app.services.robot_service import (
     publish_robot_version,
     update_robot_tags,
 )
-from app.services.storage_service import get_artifact_storage
+from app.services.robot_env_service import delete_env_var, list_env_vars, normalize_env_name, upsert_env_vars
+from app.services.scheduler_service import create_schedule, create_sla_rule, delete_schedule, get_schedule, get_sla_rule, update_schedule, update_sla_rule
+from app.services.storage_service import extract_required_env_keys_from_artifact, get_artifact_storage
 
 router = APIRouter(prefix="/robots", tags=["robots"])
 
@@ -108,6 +113,10 @@ async def publish_version(
     arguments_json: str | None = Form(default=None),
     env_vars_json: str | None = Form(default=None),
     working_directory: str | None = Form(default=None),
+    activate: bool = Form(default=True),
+    commit_sha: str | None = Form(default=None),
+    branch: str | None = Form(default=None),
+    build_url: str | None = Form(default=None),
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission(PERMISSION_ROBOT_PUBLISH, robot_id_param="robot_id")),
 ) -> RobotVersionRead:
@@ -133,6 +142,11 @@ async def publish_version(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
+    required_env_keys = extract_required_env_keys_from_artifact(
+        artifact_path=stored.absolute_path,
+        artifact_type=stored.artifact_type,
+    )
+
     try:
         published = publish_robot_version(
             db=db,
@@ -144,6 +158,12 @@ async def publish_version(
             artifact_path=stored.relative_path,
             artifact_sha256=stored.sha256,
             created_by=principal.user.id if principal.user else None,
+            activate=activate,
+            created_source="user",
+            commit_sha=commit_sha,
+            branch=branch,
+            build_url=build_url,
+            required_env_keys_json=required_env_keys,
             entrypoint_path=entrypoint_path,
             entrypoint_type=("EXE" if stored.artifact_type == ArtifactType.EXE.value else entrypoint_type),
             arguments=parsed_arguments,
@@ -167,6 +187,11 @@ async def publish_version(
             "artifact_type": stored.artifact_type,
             "artifact_path": stored.relative_path,
             "artifact_sha256": stored.sha256,
+            "activate": activate,
+            "commit_sha": commit_sha,
+            "branch": branch,
+            "build_url": build_url,
+            "required_env_keys_json": required_env_keys,
         },
     )
     return _serialize_version(published)
@@ -219,3 +244,242 @@ def patch_robot_tags(
         metadata={"robot_id": str(robot_id), "tags": payload.tags},
     )
     return _serialize_robot(robot)
+
+
+@router.get("/{robot_id}/env", response_model=list[RobotEnvVarRead])
+def get_robot_env_vars(
+    robot_id: UUID,
+    env: str = Query("PROD"),
+    db: Session = Depends(get_db),
+    _: Principal = Depends(require_permission(PERMISSION_ROBOT_READ, robot_id_param="robot_id")),
+) -> list[RobotEnvVarRead]:
+    try:
+        return list_env_vars(db=db, robot_id=robot_id, env_name=env)
+    except ValueError as exc:
+        status_code = status.HTTP_404_NOT_FOUND if "not found" in str(exc).lower() else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+
+@router.put("/{robot_id}/env", response_model=list[RobotEnvVarRead])
+def put_robot_env_vars(
+    robot_id: UUID,
+    payload: RobotEnvVarUpsertRequest,
+    request: Request,
+    env: str = Query("PROD"),
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(PERMISSION_ROBOT_PUBLISH, robot_id_param="robot_id")),
+) -> list[RobotEnvVarRead]:
+    try:
+        touched, actions = upsert_env_vars(
+            db=db,
+            robot_id=robot_id,
+            env_name=env,
+            items=payload.items,
+            actor_user_id=principal.user.id if principal.user else None,
+        )
+    except ValueError as exc:
+        status_code = status.HTTP_404_NOT_FOUND if "not found" in str(exc).lower() else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+    normalized_env = normalize_env_name(env)
+    for item, action in zip(touched, actions):
+        log_audit_event(
+            db=db,
+            action=f"robot_env_var.{action}",
+            principal=principal,
+            actor_ip=extract_client_ip(request.headers.get("x-forwarded-for"), request.client.host if request.client else None),
+            target_type="robot_env_var",
+            target_id=f"{robot_id}:{normalized_env}:{item.key}",
+            metadata={
+                "robot_id": str(robot_id),
+                "env_name": normalized_env,
+                "key": item.key,
+                "is_secret": item.is_secret,
+                "action": action,
+            },
+        )
+    return list_env_vars(db=db, robot_id=robot_id, env_name=normalized_env)
+
+
+@router.delete("/{robot_id}/env/{key}", response_model=Message)
+def remove_robot_env_var(
+    robot_id: UUID,
+    key: str,
+    request: Request,
+    env: str = Query("PROD"),
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(PERMISSION_ROBOT_PUBLISH, robot_id_param="robot_id")),
+) -> Message:
+    try:
+        normalized_env = normalize_env_name(env)
+        delete_env_var(db=db, robot_id=robot_id, env_name=normalized_env, key=key)
+    except ValueError as exc:
+        status_code = status.HTTP_404_NOT_FOUND if "not found" in str(exc).lower() else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+    log_audit_event(
+        db=db,
+        action="robot_env_var.deleted",
+        principal=principal,
+        actor_ip=extract_client_ip(request.headers.get("x-forwarded-for"), request.client.host if request.client else None),
+        target_type="robot_env_var",
+        target_id=f"{robot_id}:{normalized_env}:{key}",
+        metadata={
+            "robot_id": str(robot_id),
+            "env_name": normalized_env,
+            "key": key,
+        },
+    )
+    return Message(message="Env key removed successfully.")
+
+
+@router.post("/{robot_id}/schedule", response_model=ScheduleRead, status_code=status.HTTP_201_CREATED)
+def create_robot_schedule(
+    robot_id: UUID,
+    payload: ScheduleCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(PERMISSION_ROBOT_PUBLISH, robot_id_param="robot_id")),
+) -> ScheduleRead:
+    try:
+        schedule = create_schedule(db=db, robot_id=robot_id, payload=payload, created_by=principal.user.id if principal.user else None)
+    except ValueError as exc:
+        status_code = status.HTTP_404_NOT_FOUND if "not found" in str(exc).lower() else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+    log_audit_event(
+        db=db,
+        action="schedule.created",
+        principal=principal,
+        actor_ip=extract_client_ip(request.headers.get("x-forwarded-for"), request.client.host if request.client else None),
+        target_type="schedule",
+        target_id=str(schedule.id),
+        metadata={"robot_id": str(robot_id), "schedule_id": str(schedule.id)},
+    )
+    return ScheduleRead.model_validate(schedule)
+
+
+@router.get("/{robot_id}/schedule", response_model=ScheduleRead)
+def get_robot_schedule(
+    robot_id: UUID,
+    db: Session = Depends(get_db),
+    _: Principal = Depends(require_permission(PERMISSION_ROBOT_READ, robot_id_param="robot_id")),
+) -> ScheduleRead:
+    schedule = get_schedule(db=db, robot_id=robot_id)
+    if not schedule:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found.")
+    return ScheduleRead.model_validate(schedule)
+
+
+@router.patch("/{robot_id}/schedule", response_model=ScheduleRead)
+def patch_robot_schedule(
+    robot_id: UUID,
+    payload: ScheduleUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(PERMISSION_ROBOT_PUBLISH, robot_id_param="robot_id")),
+) -> ScheduleRead:
+    try:
+        schedule = update_schedule(db=db, robot_id=robot_id, payload=payload)
+    except ValueError as exc:
+        status_code = status.HTTP_404_NOT_FOUND if "not found" in str(exc).lower() else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+    log_audit_event(
+        db=db,
+        action="schedule.updated",
+        principal=principal,
+        actor_ip=extract_client_ip(request.headers.get("x-forwarded-for"), request.client.host if request.client else None),
+        target_type="schedule",
+        target_id=str(schedule.id),
+        metadata={"robot_id": str(robot_id), "schedule_id": str(schedule.id)},
+    )
+    return ScheduleRead.model_validate(schedule)
+
+
+@router.delete("/{robot_id}/schedule", response_model=Message)
+def remove_robot_schedule(
+    robot_id: UUID,
+    request: Request,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(PERMISSION_ROBOT_PUBLISH, robot_id_param="robot_id")),
+) -> Message:
+    try:
+        delete_schedule(db=db, robot_id=robot_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    log_audit_event(
+        db=db,
+        action="schedule.deleted",
+        principal=principal,
+        actor_ip=extract_client_ip(request.headers.get("x-forwarded-for"), request.client.host if request.client else None),
+        target_type="schedule",
+        target_id=str(robot_id),
+        metadata={"robot_id": str(robot_id)},
+    )
+    return Message(message="Schedule removed successfully.")
+
+
+@router.post("/{robot_id}/sla", response_model=SlaRuleRead, status_code=status.HTTP_201_CREATED)
+def create_robot_sla(
+    robot_id: UUID,
+    payload: SlaRuleCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(PERMISSION_ROBOT_PUBLISH, robot_id_param="robot_id")),
+) -> SlaRuleRead:
+    try:
+        rule = create_sla_rule(db=db, robot_id=robot_id, payload=payload, created_by=principal.user.id if principal.user else None)
+    except ValueError as exc:
+        status_code = status.HTTP_404_NOT_FOUND if "not found" in str(exc).lower() else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+    log_audit_event(
+        db=db,
+        action="sla.created",
+        principal=principal,
+        actor_ip=extract_client_ip(request.headers.get("x-forwarded-for"), request.client.host if request.client else None),
+        target_type="sla_rule",
+        target_id=str(rule.id),
+        metadata={"robot_id": str(robot_id), "sla_id": str(rule.id)},
+    )
+    return SlaRuleRead.model_validate(rule)
+
+
+@router.get("/{robot_id}/sla", response_model=SlaRuleRead)
+def get_robot_sla(
+    robot_id: UUID,
+    db: Session = Depends(get_db),
+    _: Principal = Depends(require_permission(PERMISSION_ROBOT_READ, robot_id_param="robot_id")),
+) -> SlaRuleRead:
+    rule = get_sla_rule(db=db, robot_id=robot_id)
+    if not rule:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SLA rule not found.")
+    return SlaRuleRead.model_validate(rule)
+
+
+@router.patch("/{robot_id}/sla", response_model=SlaRuleRead)
+def patch_robot_sla(
+    robot_id: UUID,
+    payload: SlaRuleUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(PERMISSION_ROBOT_PUBLISH, robot_id_param="robot_id")),
+) -> SlaRuleRead:
+    try:
+        rule = update_sla_rule(db=db, robot_id=robot_id, payload=payload)
+    except ValueError as exc:
+        status_code = status.HTTP_404_NOT_FOUND if "not found" in str(exc).lower() else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+    log_audit_event(
+        db=db,
+        action="sla.updated",
+        principal=principal,
+        actor_ip=extract_client_ip(request.headers.get("x-forwarded-for"), request.client.host if request.client else None),
+        target_type="sla_rule",
+        target_id=str(rule.id),
+        metadata={"robot_id": str(robot_id), "sla_id": str(rule.id)},
+    )
+    return SlaRuleRead.model_validate(rule)

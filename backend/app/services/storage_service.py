@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import shutil
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 from uuid import UUID
 
 from fastapi import UploadFile
+try:
+    import yaml
+except Exception:  # noqa: BLE001
+    yaml = None
 
 from app.core.config import get_settings
 
@@ -69,6 +74,54 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def extract_required_env_keys_from_artifact(artifact_path: str, artifact_type: str) -> list[str]:
+    if artifact_type != "ZIP":
+        return []
+    if yaml is None:
+        return []
+    path = Path(artifact_path)
+    if not path.exists():
+        return []
+
+    try:
+        with zipfile.ZipFile(path, "r") as zipped:
+            robot_yaml_name = _find_robot_yaml(zipped.namelist())
+            if not robot_yaml_name:
+                return []
+            with zipped.open(robot_yaml_name, "r") as handle:
+                payload = yaml.safe_load(handle.read().decode("utf-8")) or {}
+    except Exception:  # noqa: BLE001
+        return []
+
+    return _parse_required_env_keys(payload)
+
+
+def _find_robot_yaml(names: list[str]) -> str | None:
+    lowered = {item.lower(): item for item in names}
+    for candidate in ("robot.yaml", "robot.yml", "./robot.yaml", "./robot.yml"):
+        if candidate in lowered:
+            return lowered[candidate]
+    for original in names:
+        base = original.split("/")[-1].lower()
+        if base in {"robot.yaml", "robot.yml"}:
+            return original
+    return None
+
+
+def _parse_required_env_keys(payload: dict) -> list[str]:
+    keys: list[str] = []
+    sections = [
+        payload.get("required_env"),
+        (payload.get("env") or {}).get("required") if isinstance(payload.get("env"), dict) else None,
+        ((payload.get("requirements") or {}).get("env") if isinstance(payload.get("requirements"), dict) else None),
+    ]
+    for section in sections:
+        if isinstance(section, list):
+            for item in section:
+                if isinstance(item, str) and item.strip():
+                    keys.append(item.strip())
+    return sorted(set(keys))
+
+
 def get_artifact_storage() -> ArtifactStorage:
     return LocalArtifactStorage()
-

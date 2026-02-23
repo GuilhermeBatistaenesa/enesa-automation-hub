@@ -16,12 +16,13 @@ export default function RunsHistoryPage() {
   const [runs, setRuns] = useState<Run[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [triggerFilter, setTriggerFilter] = useState<"" | "MANUAL" | "SCHEDULED" | "RETRY">("");
 
   const loadRuns = async () => {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetchRuns(token);
+      const response = await fetchRuns(token, { triggerType: triggerFilter || undefined });
       setRuns(response.items);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load runs history.");
@@ -33,7 +34,7 @@ export default function RunsHistoryPage() {
   useEffect(() => {
     loadRuns().catch(() => undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [triggerFilter]);
 
   const durationByRobot = useMemo(() => {
     const map = new Map<string, { label: string; duration: number }>();
@@ -49,7 +50,7 @@ export default function RunsHistoryPage() {
     <>
       <header className="page-header">
         <h2 className="page-title">Runs History</h2>
-        <p className="page-subtitle">Execution timeline with version traceability and artifact downloads.</p>
+        <p className="page-subtitle">Execution timeline with version traceability, trigger type and retries.</p>
       </header>
 
       <section className="card" style={{ marginBottom: 16 }}>
@@ -57,6 +58,15 @@ export default function RunsHistoryPage() {
           <label style={{ minWidth: 340 }}>
             API token (Bearer)
             <input value={token} onChange={(event) => setToken(event.target.value)} />
+          </label>
+          <label>
+            Trigger filter
+            <select value={triggerFilter} onChange={(event) => setTriggerFilter(event.target.value as "" | "MANUAL" | "SCHEDULED" | "RETRY") }>
+              <option value="">All</option>
+              <option value="MANUAL">MANUAL</option>
+              <option value="SCHEDULED">SCHEDULED</option>
+              <option value="RETRY">RETRY</option>
+            </select>
           </label>
           <button className="btn-secondary" onClick={() => loadRuns()}>
             Refresh history
@@ -88,10 +98,13 @@ export default function RunsHistoryPage() {
               <th>Robot</th>
               <th>Status</th>
               <th>Version</th>
+              <th>Trigger</th>
+              <th>Attempt</th>
               <th>Started</th>
               <th>Finished</th>
               <th>Duration (s)</th>
               <th>Error</th>
+              <th>Canceled By</th>
               <th>Artifacts</th>
             </tr>
           </thead>
@@ -113,10 +126,13 @@ export default function RunsHistoryPage() {
                     run.robot_version_id.slice(0, 8)
                   )}
                 </td>
+                <td>{run.trigger_type}</td>
+                <td>{run.attempt}</td>
                 <td>{run.started_at ? new Date(run.started_at).toLocaleString() : "-"}</td>
                 <td>{run.finished_at ? new Date(run.finished_at).toLocaleString() : "-"}</td>
                 <td>{run.duration_seconds ?? "-"}</td>
                 <td>{run.error_message ?? "-"}</td>
+                <td>{run.canceled_by ? `${run.canceled_by.slice(0, 8)}...` : "-"}</td>
                 <td>
                   {run.artifacts.length > 0 ? (
                     run.artifacts.map((artifact) => (
@@ -138,7 +154,7 @@ export default function RunsHistoryPage() {
             ))}
             {runs.length === 0 ? (
               <tr>
-                <td colSpan={10}>No runs available.</td>
+                <td colSpan={13}>No runs available.</td>
               </tr>
             ) : null}
           </tbody>

@@ -1,13 +1,20 @@
 import {
+  AlertEvent,
   Domain,
   ExecuteRunRequest,
+  OpsStatus,
+  RobotEnvVar,
+  RobotEnvVarUpsertItem,
   RobotListResponse,
   RobotVersion,
   Run,
   RunListResponse,
   RunLog,
+  Schedule,
   Service,
-  ServiceRunRequest
+  ServiceRunRequest,
+  SlaRule,
+  Worker
 } from "@/lib/types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000/api/v1";
@@ -59,6 +66,54 @@ export async function fetchRobotVersions(robotId: string, token?: string): Promi
   return handleResponse<RobotVersion[]>(response);
 }
 
+export async function fetchRobotEnvVars(
+  robotId: string,
+  envName: "PROD" | "HML" | "TEST",
+  token?: string
+): Promise<RobotEnvVar[]> {
+  const response = await fetch(`${API_BASE}/robots/${robotId}/env?env=${envName}`, {
+    cache: "no-store",
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(token)
+    }
+  });
+  return handleResponse<RobotEnvVar[]>(response);
+}
+
+export async function upsertRobotEnvVars(
+  robotId: string,
+  envName: "PROD" | "HML" | "TEST",
+  items: RobotEnvVarUpsertItem[],
+  token?: string
+): Promise<RobotEnvVar[]> {
+  const response = await fetch(`${API_BASE}/robots/${robotId}/env?env=${envName}`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(token)
+    },
+    body: JSON.stringify({ items })
+  });
+  return handleResponse<RobotEnvVar[]>(response);
+}
+
+export async function deleteRobotEnvVar(
+  robotId: string,
+  envName: "PROD" | "HML" | "TEST",
+  key: string,
+  token?: string
+): Promise<{ message: string }> {
+  const response = await fetch(`${API_BASE}/robots/${robotId}/env/${encodeURIComponent(key)}?env=${envName}`, {
+    method: "DELETE",
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(token)
+    }
+  });
+  return handleResponse<{ message: string }>(response);
+}
+
 export async function publishRobotVersion(robotId: string, formData: FormData, token?: string): Promise<RobotVersion> {
   const response = await fetch(`${API_BASE}/robots/${robotId}/versions/publish`, {
     method: "POST",
@@ -93,8 +148,17 @@ export async function executeRun(robotId: string, payload: ExecuteRunRequest, to
   return handleResponse<Run>(response);
 }
 
-export async function fetchRuns(token?: string): Promise<RunListResponse> {
-  const response = await fetch(`${API_BASE}/runs`, {
+export async function fetchRuns(
+  token?: string,
+  query?: { robotId?: string; serviceId?: string; triggerType?: "MANUAL" | "SCHEDULED" | "RETRY"; status?: string }
+): Promise<RunListResponse> {
+  const params = new URLSearchParams();
+  if (query?.robotId) params.set("robot_id", query.robotId);
+  if (query?.serviceId) params.set("service_id", query.serviceId);
+  if (query?.triggerType) params.set("trigger_type", query.triggerType);
+  if (query?.status) params.set("status", query.status);
+
+  const response = await fetch(`${API_BASE}/runs${params.size ? `?${params.toString()}` : ""}`, {
     cache: "no-store",
     headers: {
       "Content-Type": "application/json",
@@ -102,6 +166,186 @@ export async function fetchRuns(token?: string): Promise<RunListResponse> {
     }
   });
   return handleResponse<RunListResponse>(response);
+}
+
+export async function fetchRun(runId: string, token?: string): Promise<Run> {
+  const response = await fetch(`${API_BASE}/runs/${runId}`, {
+    cache: "no-store",
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(token)
+    }
+  });
+  return handleResponse<Run>(response);
+}
+
+export async function cancelRun(runId: string, token?: string): Promise<Run> {
+  const response = await fetch(`${API_BASE}/runs/${runId}/cancel`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(token)
+    }
+  });
+  return handleResponse<Run>(response);
+}
+
+export async function fetchWorkers(token?: string): Promise<Worker[]> {
+  const response = await fetch(`${API_BASE}/workers`, {
+    cache: "no-store",
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(token)
+    }
+  });
+  return handleResponse<Worker[]>(response);
+}
+
+export async function pauseWorker(workerId: string, token?: string): Promise<Worker> {
+  const response = await fetch(`${API_BASE}/workers/${workerId}/pause`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(token)
+    }
+  });
+  return handleResponse<Worker>(response);
+}
+
+export async function resumeWorker(workerId: string, token?: string): Promise<Worker> {
+  const response = await fetch(`${API_BASE}/workers/${workerId}/resume`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(token)
+    }
+  });
+  return handleResponse<Worker>(response);
+}
+
+export async function fetchOpsStatus(token?: string): Promise<OpsStatus> {
+  const response = await fetch(`${API_BASE}/ops/status`, {
+    cache: "no-store",
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(token)
+    }
+  });
+  return handleResponse<OpsStatus>(response);
+}
+
+export async function createRobotSchedule(robotId: string, payload: unknown, token?: string): Promise<Schedule> {
+  const response = await fetch(`${API_BASE}/robots/${robotId}/schedule`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(token)
+    },
+    body: JSON.stringify(payload)
+  });
+  return handleResponse<Schedule>(response);
+}
+
+export async function fetchRobotSchedule(robotId: string, token?: string): Promise<Schedule> {
+  const response = await fetch(`${API_BASE}/robots/${robotId}/schedule`, {
+    cache: "no-store",
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(token)
+    }
+  });
+  return handleResponse<Schedule>(response);
+}
+
+export async function updateRobotSchedule(robotId: string, payload: unknown, token?: string): Promise<Schedule> {
+  const response = await fetch(`${API_BASE}/robots/${robotId}/schedule`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(token)
+    },
+    body: JSON.stringify(payload)
+  });
+  return handleResponse<Schedule>(response);
+}
+
+export async function deleteRobotSchedule(robotId: string, token?: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/robots/${robotId}/schedule`, {
+    method: "DELETE",
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(token)
+    }
+  });
+  if (!response.ok) {
+    const errorBody = await response.text();
+    throw new Error(errorBody || "Request failed.");
+  }
+}
+
+export async function createRobotSla(robotId: string, payload: unknown, token?: string): Promise<SlaRule> {
+  const response = await fetch(`${API_BASE}/robots/${robotId}/sla`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(token)
+    },
+    body: JSON.stringify(payload)
+  });
+  return handleResponse<SlaRule>(response);
+}
+
+export async function fetchRobotSla(robotId: string, token?: string): Promise<SlaRule> {
+  const response = await fetch(`${API_BASE}/robots/${robotId}/sla`, {
+    cache: "no-store",
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(token)
+    }
+  });
+  return handleResponse<SlaRule>(response);
+}
+
+export async function updateRobotSla(robotId: string, payload: unknown, token?: string): Promise<SlaRule> {
+  const response = await fetch(`${API_BASE}/robots/${robotId}/sla`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(token)
+    },
+    body: JSON.stringify(payload)
+  });
+  return handleResponse<SlaRule>(response);
+}
+
+export async function fetchAlerts(
+  token?: string,
+  query?: { status?: "open" | "resolved"; type?: AlertEvent["type"]; robotId?: string; limit?: number }
+): Promise<AlertEvent[]> {
+  const params = new URLSearchParams();
+  if (query?.status) params.set("status", query.status);
+  if (query?.type) params.set("type", query.type);
+  if (query?.robotId) params.set("robot_id", query.robotId);
+  if (query?.limit) params.set("limit", String(query.limit));
+  const response = await fetch(`${API_BASE}/alerts${params.size ? `?${params.toString()}` : ""}`, {
+    cache: "no-store",
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(token)
+    }
+  });
+  return handleResponse<AlertEvent[]>(response);
+}
+
+export async function resolveAlert(alertId: string, token?: string): Promise<AlertEvent> {
+  const response = await fetch(`${API_BASE}/alerts/${alertId}/resolve`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(token)
+    }
+  });
+  return handleResponse<AlertEvent>(response);
 }
 
 export async function fetchDomains(token?: string): Promise<Domain[]> {

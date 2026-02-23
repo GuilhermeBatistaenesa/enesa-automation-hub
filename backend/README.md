@@ -1,112 +1,80 @@
-# Enesa Automation Hub - Backend
+﻿# Enesa Automation Hub - Backend
 
-Backend corporativo em FastAPI, SQL Server e Redis para registry de robos e portal de autoatendimento.
+Backend corporativo em FastAPI para registry de robos, scheduler, SLA monitor, deploy CI/CD e Config/Secrets.
 
 ## Stack
 
 - FastAPI + Uvicorn
 - SQL Server via SQLAlchemy + pyodbc
-- Redis para fila de execucao e pub/sub de logs
+- Redis para fila e pub/sub de logs
 - WebSocket para logs em tempo real
 - Azure AD OIDC/JWKS + fallback local
-- RBAC granular por permissao
-- Metricas Prometheus em `/metrics`
+- RBAC granular
 
 ## Setup
 
-1. Copiar `.env.example` para `.env`.
-2. Instalar dependencias: `pip install -r requirements.txt`.
-3. Executar migracoes SQL:
-   - `migrations/0001_initial_schema.sql`
-   - `migrations/0002_enterprise_security_observability.sql`
-   - `migrations/0003_robot_versions_registry.sql`
-   - `migrations/0004_self_service_portal.sql`
-4. Subir API: `uvicorn app.main:app --reload --host 0.0.0.0 --port 8000`.
-5. Subir worker: `python -m app.workers.executor`.
-6. Subir cleanup: `python -m app.workers.cleanup`.
+1. Copiar `.env.example` para `.env`
+2. `pip install -r requirements.txt`
+3. Executar migracoes SQL `0001` a `0007`
+4. Subir API: `uvicorn app.main:app --reload --host 0.0.0.0 --port 8000`
+5. Subir processos:
+   - `python -m app.workers.executor`
+   - `python -m app.workers.cleanup`
+   - `python -m app.workers.scheduler`
+   - `python -m app.workers.sla_monitor`
 
 ## Endpoints
 
-### Registry de robos
+### Registry
 
-- `POST /api/v1/robots`
-- `GET /api/v1/robots`
-- `PATCH /api/v1/robots/{robot_id}/tags`
 - `POST /api/v1/robots/{robot_id}/versions/publish`
 - `GET /api/v1/robots/{robot_id}/versions`
 - `POST /api/v1/robots/{robot_id}/versions/{version_id}/activate`
 
-### Runs
+### Deploy (GitHub Actions)
 
-- `POST /api/v1/runs/{robot_id}/execute`
-- `GET /api/v1/runs`
-- `GET /api/v1/runs/{run_id}`
-- `GET /api/v1/runs/{run_id}/logs`
-- `GET /api/v1/runs/{run_id}/artifacts/{artifact_id}/download`
-- `WS /api/v1/ws/runs/{run_id}/logs?token=<jwt>`
+- `POST /api/v1/deploy/robots/{robot_id}/versions/publish`
+  - Auth via `x-deploy-token`
+  - Campos: `version`, `changelog`, `commit_sha`, `branch`, `build_url`, `activate`, `artifact`
 
-### Portal
+### Config/Secrets
 
-- `POST/GET/PATCH/DELETE /api/v1/domains`
-- `POST/GET/PATCH/DELETE /api/v1/services`
-- `GET /api/v1/domains/{slug}/services`
-- `POST /api/v1/services/{service_id}/run`
-- `GET /api/v1/services/{service_id}/runs`
+- `GET /api/v1/robots/{robot_id}/env?env=PROD|HML|TEST`
+- `PUT /api/v1/robots/{robot_id}/env?env=PROD|HML|TEST`
+- `DELETE /api/v1/robots/{robot_id}/env/{key}?env=PROD|HML|TEST`
 
-### Admin
+### Scheduler
 
-- `POST /api/v1/users`
-- `GET /api/v1/users`
-- `GET /api/v1/users/{user_id}/permissions`
-- `POST /api/v1/users/{user_id}/permissions`
+- `POST /api/v1/robots/{robot_id}/schedule`
+- `GET /api/v1/robots/{robot_id}/schedule`
+- `PATCH /api/v1/robots/{robot_id}/schedule`
+- `DELETE /api/v1/robots/{robot_id}/schedule`
 
-## Portal JSON contracts
+### SLA
 
-### form_schema_json
+- `POST /api/v1/robots/{robot_id}/sla`
+- `GET /api/v1/robots/{robot_id}/sla`
+- `PATCH /api/v1/robots/{robot_id}/sla`
 
-```json
-{
-  "fields": [
-    {
-      "key": "periodo",
-      "label": "Periodo",
-      "type": "text",
-      "required": true,
-      "default": "2026-02",
-      "helpText": "YYYY-MM",
-      "validation": {
-        "regex": "^\\d{4}-\\d{2}$"
-      }
-    }
-  ]
-}
-```
+### Alertas
 
-### run_template_json
+- `GET /api/v1/alerts`
+- `POST /api/v1/alerts/{alert_id}/resolve`
 
-```json
-{
-  "defaults": {
-    "incluir_inativos": false
-  },
-  "mapping": {
-    "runtime_arguments": [
-      "--periodo={periodo}",
-      "--inativos={incluir_inativos}"
-    ],
-    "runtime_env": {
-      "SERVICE_DOMAIN": "dp-rh"
-    }
-  }
-}
-```
+## Scheduler rules
 
-## RBAC
+- Intervalo do scheduler: `SCHEDULER_INTERVAL_SECONDS` (default `30`)
+- Timezone default: `America/Sao_Paulo`
+- Lock de concorrencia por robo
+- Timeout por run (`timeout_seconds`)
+- Retry com backoff (`retry_count`, `retry_backoff_seconds`)
 
-- `Viewer`: `service.read`, `robot.read`, `run.read`, `artifact.download`
-- `Operator`: Viewer + `service.run`, `robot.run`
-- `Maintainer`: Operator + `robot.publish`
-- `Admin`: todas as permissoes, incluindo `service.manage` e `admin.manage`
+## SLA monitor rules
+
+- Intervalo: `SLA_MONITOR_INTERVAL_SECONDS` (default `60`)
+- Threshold de fila: `QUEUE_BACKLOG_ALERT_THRESHOLD`
+- Worker stale threshold: `WORKER_STALE_SECONDS`
+- Failure streak: `FAILURE_STREAK_THRESHOLD`
 
 ## Testes
 

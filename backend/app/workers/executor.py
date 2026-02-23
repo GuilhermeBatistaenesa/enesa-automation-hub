@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -25,12 +25,23 @@ from app.db.session import SessionLocal
 from app.models.artifact import Artifact
 from app.models.robot import ArtifactType, EntryPointType, RobotVersion
 from app.models.run import Run, RunLog, RunStatus
-from app.services.queue_service import get_run_log_channel, get_sync_redis, refresh_queue_depth_sync
+from app.models.scheduler import Schedule, TriggerType
+from app.models.worker import WorkerStatus
+from app.services.queue_service import get_run_log_channel, get_sync_redis, refresh_queue_depth_sync, register_worker_heartbeat
+from app.services.robot_env_service import resolve_runtime_env
+from app.services.worker_service import get_worker, set_worker_status, upsert_worker_heartbeat
+
+try:
+    import psutil
+except Exception:  # noqa: BLE001
+    psutil = None
 
 settings = get_settings()
 configure_logging(level=getattr(logging, settings.log_level.upper(), logging.INFO), log_format=settings.log_format)
 logger = logging.getLogger("enesa.worker")
 worker_name = f"{socket.gethostname()}:{os.getpid()}"
+worker_id = UUID(os.getenv("ENESA_WORKER_ID", str(uuid4())))
+worker_version = os.getenv("ENESA_WORKER_VERSION", "2.0.0")
 
 
 @dataclass(slots=True)
@@ -160,6 +171,100 @@ def _resolve_execution_plan(version: RobotVersion, run_dir: Path, runtime_argume
     raise ValueError(f"Unsupported artifact_type: {version.artifact_type}")
 
 
+def _mark_worker_running() -> None:
+    db = SessionLocal()
+    try:
+        upsert_worker_heartbeat(
+            db=db,
+            worker_id=worker_id,
+            hostname=socket.gethostname(),
+            version=worker_version,
+            status_if_new=WorkerStatus.RUNNING.value,
+        )
+    finally:
+        db.close()
+
+
+def _mark_worker_stopped() -> None:
+    db = SessionLocal()
+    try:
+        existing = get_worker(db=db, worker_id=worker_id)
+        if existing:
+            set_worker_status(db=db, worker_id=worker_id, status=WorkerStatus.STOPPED.value)
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to mark worker as STOPPED")
+    finally:
+        db.close()
+
+
+def _touch_worker_heartbeat() -> str:
+    db = SessionLocal()
+    try:
+        worker = upsert_worker_heartbeat(
+            db=db,
+            worker_id=worker_id,
+            hostname=socket.gethostname(),
+            version=worker_version,
+            status_if_new=WorkerStatus.RUNNING.value,
+        )
+        return worker.status
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to persist worker heartbeat")
+        return WorkerStatus.RUNNING.value
+    finally:
+        db.close()
+
+
+def _read_worker_status() -> str:
+    db = SessionLocal()
+    try:
+        worker = get_worker(db=db, worker_id=worker_id)
+        if not worker:
+            worker = upsert_worker_heartbeat(
+                db=db,
+                worker_id=worker_id,
+                hostname=socket.gethostname(),
+                version=worker_version,
+                status_if_new=WorkerStatus.RUNNING.value,
+            )
+        return worker.status
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to read worker status")
+        return WorkerStatus.RUNNING.value
+    finally:
+        db.close()
+
+
+def _terminate_process_tree(process: subprocess.Popen[str], grace_seconds: float = 5.0) -> None:
+    if process.poll() is not None:
+        return
+
+    if psutil is not None:
+        try:
+            parent = psutil.Process(process.pid)
+            children = parent.children(recursive=True)
+            for child in children:
+                child.terminate()
+            parent.terminate()
+            _, alive = psutil.wait_procs([*children, parent], timeout=grace_seconds)
+            for node in alive:
+                node.kill()
+            return
+        except Exception:  # noqa: BLE001
+            logger.warning("Failed to terminate process tree with psutil for pid=%s. Falling back.", process.pid)
+
+    try:
+        process.terminate()
+        process.wait(timeout=grace_seconds)
+    except Exception:  # noqa: BLE001
+        process.kill()
+
+
+def _is_cancel_requested(db: Session, run: Run) -> bool:
+    db.refresh(run, attribute_names=["cancel_requested", "status"])
+    return bool(run.cancel_requested and run.status == RunStatus.RUNNING.value)
+
+
 def process_run(payload: dict[str, Any]) -> None:
     run_id = UUID(payload["run_id"])
     runtime_arguments = payload.get("runtime_arguments", [])
@@ -171,6 +276,8 @@ def process_run(payload: dict[str, Any]) -> None:
         if not run:
             logger.error("Run %s not found", run_id)
             return
+
+        schedule = db.scalar(select(Schedule).where(Schedule.id == run.schedule_id)) if run.schedule_id else None
 
         version = db.scalar(select(RobotVersion).where(RobotVersion.id == run.robot_version_id))
         if not version:
@@ -193,12 +300,17 @@ def process_run(payload: dict[str, Any]) -> None:
 
         append_log(db, run_id, "INFO", "Execution started.")
         append_log(db, run_id, "INFO", f"Using robot version {version.version} ({version.id})")
+        append_log(db, run_id, "INFO", f"Runtime environment: {run.env_name}")
 
         plan = _resolve_execution_plan(version=version, run_dir=run_dir, runtime_arguments=runtime_arguments)
-        env = make_environment(version=version, runtime_env=runtime_env)
+        robot_env_values = resolve_runtime_env(db=db, robot_id=run.robot_id, env_name=run.env_name)
+        merged_runtime_env = {**robot_env_values, **runtime_env}
+        env = make_environment(version=version, runtime_env=merged_runtime_env)
+        timeout_seconds = schedule.timeout_seconds if schedule else 3600
 
         append_log(db, run_id, "INFO", f"Command: {' '.join(plan.command)}")
         append_log(db, run_id, "INFO", f"Working directory: {plan.working_directory}")
+        append_log(db, run_id, "INFO", f"Timeout seconds: {timeout_seconds}")
 
         process = subprocess.Popen(
             plan.command,
@@ -218,6 +330,10 @@ def process_run(payload: dict[str, Any]) -> None:
         stderr_thread = threading.Thread(target=stream_to_queue, args=(process.stderr, "ERROR", line_queue), daemon=True)
         stdout_thread.start()
         stderr_thread.start()
+        started_monotonic = time.monotonic()
+        timed_out = False
+        canceled = False
+        last_cancel_check = 0.0
 
         with log_file_path.open("a", encoding="utf-8") as log_file:
             while True:
@@ -229,6 +345,24 @@ def process_run(payload: dict[str, Any]) -> None:
                 except queue.Empty:
                     pass
 
+                now_monotonic = time.monotonic()
+                if process.poll() is None and (now_monotonic - last_cancel_check) >= 1:
+                    last_cancel_check = now_monotonic
+                    if _is_cancel_requested(db=db, run=run):
+                        canceled = True
+                        append_log(db, run_id, "INFO", "Execution canceled by user")
+                        _terminate_process_tree(process)
+
+                if (
+                    not canceled
+                    and process.poll() is None
+                    and timeout_seconds > 0
+                    and (now_monotonic - started_monotonic) > timeout_seconds
+                ):
+                    timed_out = True
+                    _terminate_process_tree(process)
+                    append_log(db, run_id, "ERROR", f"TIMEOUT: exceeded {timeout_seconds} seconds.")
+
                 if process.poll() is not None and line_queue.empty() and not stdout_thread.is_alive() and not stderr_thread.is_alive():
                     break
 
@@ -236,18 +370,31 @@ def process_run(payload: dict[str, Any]) -> None:
         finished_at = utcnow()
         run.finished_at = finished_at
         run.duration_seconds = (finished_at - (run.started_at or finished_at)).total_seconds()
+        run.process_id = None
 
-        if return_code == 0:
+        if canceled:
+            run.status = RunStatus.CANCELED.value
+            run.error_message = None
+            run.canceled_at = finished_at
+            append_log(db, run_id, "INFO", "Execution marked as CANCELED.")
+        elif return_code == 0 and not timed_out:
             run.status = RunStatus.SUCCESS.value
             run.error_message = None
             append_log(db, run_id, "INFO", "Execution finished successfully.")
         else:
             run.status = RunStatus.FAILED.value
-            run.error_message = f"Process returned exit code {return_code}"
+            run.error_message = "TIMEOUT" if timed_out else f"Process returned exit code {return_code}"
             append_log(db, run_id, "ERROR", run.error_message)
 
         db.commit()
         register_artifacts(db=db, run=run, run_dir=run_dir)
+        _schedule_retry_if_needed(
+            db=db,
+            run=run,
+            schedule=schedule,
+            runtime_arguments=runtime_arguments,
+            runtime_env=runtime_env,
+        )
         finalize_metrics(run)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Unexpected failure executing run %s", payload.get("run_id"))
@@ -268,23 +415,116 @@ def process_run(payload: dict[str, Any]) -> None:
 def run_worker() -> None:
     redis = get_sync_redis()
     queue_name = settings.redis_queue_name
-    logger.info("Worker started, listening queue=%s", queue_name)
+    logger.info("Worker started, listening queue=%s worker_id=%s", queue_name, worker_id)
 
-    while True:
-        worker_heartbeat.labels(worker=worker_name).set(time.time())
-        refresh_queue_depth_sync()
-        item = redis.brpop(queue_name, timeout=5)
-        if not item:
-            continue
+    _mark_worker_running()
+    current_status = WorkerStatus.RUNNING.value
+    last_heartbeat_ts = 0.0
+    last_status_poll_ts = 0.0
 
-        _, raw_payload = item
-        try:
-            payload = json.loads(raw_payload)
-        except json.JSONDecodeError:
-            logger.error("Invalid payload from queue: %s", raw_payload)
-            continue
+    try:
+        while True:
+            now = time.time()
+            if now - last_heartbeat_ts >= 10:
+                last_heartbeat_ts = now
+                worker_heartbeat.labels(worker=worker_name).set(now)
+                current_status = _touch_worker_heartbeat()
+                register_worker_heartbeat(worker_name=worker_name, ttl_seconds=max(60, settings.worker_stale_seconds * 2))
 
-        process_run(payload)
+            if now - last_status_poll_ts >= 2:
+                last_status_poll_ts = now
+                current_status = _read_worker_status()
+
+            refresh_queue_depth_sync()
+
+            if current_status in {WorkerStatus.PAUSED.value, WorkerStatus.STOPPED.value}:
+                time.sleep(2)
+                continue
+
+            item = redis.brpop(queue_name, timeout=5)
+            if not item:
+                continue
+
+            _, raw_payload = item
+            current_status = _read_worker_status()
+            if current_status in {WorkerStatus.PAUSED.value, WorkerStatus.STOPPED.value}:
+                redis.rpush(queue_name, raw_payload)
+                time.sleep(1)
+                continue
+
+            try:
+                payload = json.loads(raw_payload)
+            except json.JSONDecodeError:
+                logger.error("Invalid payload from queue: %s", raw_payload)
+                continue
+
+            not_before_ts = payload.get("not_before_ts")
+            if isinstance(not_before_ts, (int, float)) and time.time() < float(not_before_ts):
+                redis.rpush(queue_name, raw_payload)
+                time.sleep(min(1.0, max(0.0, float(not_before_ts) - time.time())))
+                continue
+
+            process_run(payload)
+    finally:
+        _mark_worker_stopped()
+
+
+def _schedule_retry_if_needed(
+    db: Session,
+    run: Run,
+    schedule: Schedule | None,
+    runtime_arguments: list[str],
+    runtime_env: dict[str, str],
+) -> None:
+    if run.status != RunStatus.FAILED.value:
+        return
+    if not schedule:
+        return
+    if run.attempt > schedule.retry_count:
+        return
+
+    retry_attempt = run.attempt + 1
+    retry_run = Run(
+        robot_id=run.robot_id,
+        robot_version_id=run.robot_version_id,
+        service_id=run.service_id,
+        schedule_id=run.schedule_id,
+        env_name=run.env_name,
+        trigger_type=TriggerType.RETRY.value,
+        attempt=retry_attempt,
+        parameters_json=run.parameters_json,
+        status=RunStatus.PENDING.value,
+        queued_at=utcnow(),
+        triggered_by=run.triggered_by,
+    )
+    db.add(retry_run)
+    db.commit()
+    db.refresh(retry_run)
+
+    retry_payload = {
+        "run_id": str(retry_run.run_id),
+        "robot_id": str(retry_run.robot_id),
+        "robot_version_id": str(retry_run.robot_version_id),
+        "runtime_arguments": runtime_arguments,
+        "runtime_env": runtime_env,
+        "triggered_by": str(retry_run.triggered_by) if retry_run.triggered_by else None,
+        "service_id": str(retry_run.service_id) if retry_run.service_id else None,
+        "schedule_id": str(retry_run.schedule_id) if retry_run.schedule_id else None,
+        "trigger_type": TriggerType.RETRY.value,
+        "attempt": retry_attempt,
+        "parameters_json": retry_run.parameters_json or {},
+        "env_name": retry_run.env_name,
+        "not_before_ts": time.time() + max(1, schedule.retry_backoff_seconds),
+    }
+    redis = get_sync_redis()
+    redis.lpush(settings.redis_queue_name, json.dumps(retry_payload))
+    refresh_queue_depth_sync()
+    append_log(
+        db,
+        run.run_id,
+        "WARN",
+        f"Retry scheduled: attempt={retry_attempt} backoff={schedule.retry_backoff_seconds}s run_id={retry_run.run_id}",
+    )
 
 
 if __name__ == "__main__":
